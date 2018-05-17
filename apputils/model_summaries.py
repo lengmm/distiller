@@ -89,13 +89,13 @@ class SummaryGraph(object):
             torch.onnx._optimize_trace(trace, False)
             graph = trace.graph()
             self.ops = []
-            self.params = {}
+            self.featuremaps = {}
             self.edges = []
             self.temp = {}
 
             in_out = list(graph.inputs()) + list(graph.outputs())
-            for param in in_out:
-                self.__add_param(param)
+            for featuremap in in_out:
+                self.__add_featuremap(featuremap)
 
             for node in graph.nodes():
                 op = {}
@@ -104,7 +104,7 @@ class SummaryGraph(object):
                 op['type'] = node.kind().lstrip('::onnx')
                 op['inputs'] = []
                 op['outputs'] = []
-                op['params'] = []
+                op['featuremaps'] = []
 
                 # in-place operators create very confusing graphs (Resnet, for example),
                 # so we "unroll" them
@@ -135,25 +135,25 @@ class SummaryGraph(object):
 
 
     def __add_input(self, op, n):
-        param = self.__add_param(n)
-        if param is None: return
-        if param['id'] not in op['inputs']:
-            op['inputs'].append(param['id'])
+        featuremap = self.__add_featuremap(n)
+        if featuremap is None: return
+        if featuremap['id'] not in op['inputs']:
+            op['inputs'].append(featuremap['id'])
 
     def __add_output(self, op, n):
-        param = self.__add_param(n)
-        if param is None: return
-        if param['id'] not in op['outputs']:
-            op['outputs'].append(param['id'])
+        featuremap = self.__add_featuremap(n)
+        if featuremap is None: return
+        if featuremap['id'] not in op['outputs']:
+            op['outputs'].append(featuremap['id'])
 
-    def __add_param(self, n):
-        param = {}
-        if n.uniqueName() not in self.params:
-            param = self.__tensor_desc(n)
-            self.params[n.uniqueName()] = param
+    def __add_featuremap(self, n):
+        featuremap = {}
+        if n.uniqueName() not in self.featuremaps:
+            featuremap = self.__tensor_desc(n)
+            self.featuremaps[n.uniqueName()] = featuremap
         else:
-            param = self.params[n.uniqueName()]
-        return param
+            featuremap = self.featuremaps[n.uniqueName()]
+        return featuremap
 
     def __tensor_desc(self, n):
         tensor = {}
@@ -167,15 +167,15 @@ class SummaryGraph(object):
             return None
         return tensor
 
-    def param_shape(self, param_id):
-        return self.params[param_id]['shape']
+    def featuremap_shape(self, featuremap_id):
+        return self.featuremaps[featuremap_id]['shape']
 
     @staticmethod
     def volume(dims):
         return np.prod(dims)
 
-    def param_volume(self, param_id):
-        return SummaryGraph.volume(self.param_shape(param_id))
+    def featuremap_volume(self, featuremap_id):
+        return SummaryGraph.volume(self.featuremap_shape(featuremap_id))
 
     def add_macs_attr(self):
         for op in self.ops:
@@ -184,14 +184,14 @@ class SummaryGraph(object):
                 conv_out = op['outputs'][0]
                 conv_in =  op['inputs'][0]
                 conv_w = op['attrs']['kernel_shape']
-                ofm_vol = self.param_volume(conv_out)
+                ofm_vol = self.featuremap_volume(conv_out)
                 # MACs = volume(OFM) * (#IFM * K^2)
-                op['attrs']['MACs'] = ofm_vol * SummaryGraph.volume(conv_w) * self.params[conv_in]['shape'][1]
+                op['attrs']['MACs'] = ofm_vol * SummaryGraph.volume(conv_w) * self.featuremaps[conv_in]['shape'][1]
             elif op['type'] == 'Gemm':
                 conv_out =  op['outputs'][0]
                 conv_in =  op['inputs'][0]
-                n_ifm = self.param_shape(conv_in)[1]
-                n_ofm = self.param_shape(conv_out)[1]
+                n_ifm = self.featuremap_shape(conv_in)[1]
+                n_ofm = self.featuremap_shape(conv_out)[1]
                 # MACs = #IFM * #OFM
                 op['attrs']['MACs'] = n_ofm * n_ifm
 
@@ -201,11 +201,11 @@ class SummaryGraph(object):
             if op['type'] in ['Conv', 'Gemm', 'MaxPool']:
                 conv_out = op['outputs'][0]
                 conv_in =  op['inputs'][0]
-                ofm_vol = self.param_volume(conv_out)
-                ifm_vol = self.param_volume(conv_in)
+                ofm_vol = self.featuremap_volume(conv_out)
+                ifm_vol = self.featuremap_volume(conv_in)
                 if op['type'] == 'Conv' or op['type'] == 'Gemm':
                     conv_w = op['inputs'][1]
-                    weights_vol = self.param_volume(conv_w)
+                    weights_vol = self.featuremap_volume(conv_w)
                     #print(ofm_vol , ifm_vol , weights_vol)
                     op['attrs']['footprint'] = ofm_vol + ifm_vol + weights_vol
                     op['attrs']['fm_vol'] = ofm_vol + ifm_vol
@@ -275,7 +275,7 @@ def connectivity_summary(sgraph):
 
 def connectivity_summary_verbose(sgraph):
     """Generate a summary of each node's connectivity, with details
-    about the parameters.
+    about the feature-maps.
 
     Args:
         sgraph: a SummaryGraph instance
@@ -290,12 +290,12 @@ def connectivity_summary_verbose(sgraph):
     for i, op in enumerate(sgraph.ops):
         outputs = []
         for blob in op['outputs']:
-            if blob in sgraph.params:
-                outputs.append(blob + ": " + str(sgraph.params[blob]['shape']))
+            if blob in sgraph.featuremaps:
+                outputs.append(blob + ": " + str(sgraph.featuremaps[blob]['shape']))
         inputs = []
         for blob in op['inputs']:
-            if blob in sgraph.params:
-                inputs.append(blob + ": " + str(sgraph.params[blob]['shape']))
+            if blob in sgraph.featuremaps:
+                inputs.append(blob + ": " + str(sgraph.featuremaps[blob]['shape']))
         inputs = format_list(inputs)
         outputs = format_list(outputs)
         #t.add_row([op['name'], op['type'], inputs, outputs])
@@ -314,7 +314,7 @@ def connectivity_tbl_summary(sgraph, verbose=False):
 
 import pydot
 
-def create_pydot_graph(sgraph, op_nodes, data_nodes, param_nodes, edges):
+def create_pydot_graph(sgraph, op_nodes, data_nodes, featuremap_nodes, edges):
     pydot_graph = pydot.Dot('Net', graph_type='digraph', rankdir='TB')
 
     node_style = {'shape': 'record',
@@ -324,15 +324,15 @@ def create_pydot_graph(sgraph, op_nodes, data_nodes, param_nodes, edges):
     for op_node in op_nodes:
         pydot_graph.add_node(pydot.Node(op_node, **node_style))
 
-    param_style = {'shape': 'oval',
+    featuremap_style = {'shape': 'oval',
                   'fillcolor': '#008000',
                   'style': 'rounded, filled'}
     for data_node in data_nodes:
-        assert sgraph.params is not None
-        if sgraph.params[data_node] is not None:
-            shape = sgraph.param_shape(data_node)
+        assert sgraph.featuremaps is not None
+        if sgraph.featuremaps[data_node] is not None:
+            shape = sgraph.featuremap_shape(data_node)
             label = data_node + '\n' + '('+(', ').join(['%s' % v for v in shape])+')'
-            pydot_graph.add_node(pydot.Node(data_node, **param_style, label=label))
+            pydot_graph.add_node(pydot.Node(data_node, **featuremap_style, label=label))
         else:
             pydot_graph.add_node(pydot.Node(data_node))
 
@@ -340,8 +340,8 @@ def create_pydot_graph(sgraph, op_nodes, data_nodes, param_nodes, edges):
                   'fillcolor': 'gray',
                   'style': 'rounded, filled'}
 
-    if param_nodes is not None:
-        for data_node in param_nodes:
+    if featuremap_nodes is not None:
+        for data_node in featuremap_nodes:
             pydot_graph.add_node(pydot.Node(data_node, **node_style))
 
     for edge in edges:
@@ -412,19 +412,19 @@ def create_png(sgraph):
     by SummaryGraph 'sgraph'
     """
     op_nodes = [op['name'] for op in sgraph.ops]
-    data_nodes = [id for id in sgraph.params.keys() if data_node_has_parent(sgraph, id)]
-    param_nodes = [id for id in sgraph.params.keys() if not data_node_has_parent(sgraph, id)]
+    data_nodes = [id for id in sgraph.featuremaps.keys() if data_node_has_parent(sgraph, id)]
+    featuremap_nodes = [id for id in sgraph.featuremaps.keys() if not data_node_has_parent(sgraph, id)]
     edges = sgraph.edges
 
-    display_param_node = False
-    if not display_param_node:
+    display_featuremap_node = False
+    if not display_featuremap_node:
         edges = [edge for edge in sgraph.edges if edge[0] in (data_nodes+op_nodes)]
-        param_nodes = None
+        featuremap_nodes = None
 
     if False:
         data_nodes = None
 
-    pydot_graph = create_pydot_graph(sgraph, op_nodes, data_nodes, param_nodes, edges)
+    pydot_graph = create_pydot_graph(sgraph, op_nodes, data_nodes, featuremap_nodes, edges)
     png = pydot_graph.create_png()
     return png
 
