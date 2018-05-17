@@ -6,9 +6,20 @@ import os
 import torch
 import torch.nn as nn
 import torch.onnx
-
+from collections import OrderedDict
 import data
 import model
+
+import os
+import sys
+script_dir = os.path.dirname(__file__)
+module_path = os.path.abspath(os.path.join(script_dir, '..', '..'))
+if module_path not in sys.path:
+    sys.path.append(module_path)
+import distiller
+import apputils
+from distiller.data_loggers import TensorBoardLogger, PythonLogger, ActivationSparsityCollector
+import torchnet.meter as tnt
 
 parser = argparse.ArgumentParser(description='PyTorch Wikitext-2 RNN/LSTM Language Model')
 parser.add_argument('--data', type=str, default='./data/wikitext-2',
@@ -45,6 +56,12 @@ parser.add_argument('--save', type=str, default='model.pt',
                     help='path to save the final model')
 parser.add_argument('--onnx-export', type=str, default='',
                     help='path to export the final model in onnx format')
+
+SUMMARY_CHOICES = ['sparsity', 'compute', 'optimizer', 'model', 'modules', 'png']
+parser.add_argument('--summary', type=str, choices=SUMMARY_CHOICES,
+                    help='print a summary of the model, and exit - options: ' +
+                    ' | '.join(SUMMARY_CHOICES))
+
 args = parser.parse_args()
 
 # Set the random seed manually for reproducibility.
@@ -59,8 +76,9 @@ device = torch.device("cuda" if args.cuda else "cpu")
 # Load data
 ###############################################################################
 
+print("Preparing data (this may take several seconds)...")
 corpus = data.Corpus(args.data)
-
+print("Done")
 # Starting from sequential data, batchify arranges the dataset into columns.
 # For instance, with the alphabet as the sequence and batch size 4, we'd get
 # ┌ a g m s ┐
@@ -74,12 +92,14 @@ corpus = data.Corpus(args.data)
 # batch processing.
 
 def batchify(data, bsz):
+    print("batch size %d" % bsz)
     # Work out how cleanly we can divide the dataset into bsz parts.
     nbatch = data.size(0) // bsz
     # Trim off any extra elements that wouldn't cleanly fit (remainders).
     data = data.narrow(0, 0, nbatch * bsz)
     # Evenly divide the data across the bsz batches.
     data = data.view(bsz, -1).t().contiguous()
+    print(data.shape)
     return data.to(device)
 
 eval_batch_size = 10
@@ -92,6 +112,8 @@ test_data = batchify(corpus.test, eval_batch_size)
 ###############################################################################
 
 ntokens = len(corpus.dictionary)
+print("ntokens = %d" % ntokens)
+print("ninp = %d\nnhid=%d\nnlayers=%d" % (args.emsize, args.nhid, args.nlayers))
 model = model.RNNModel(args.model, ntokens, args.emsize, args.nhid, args.nlayers, args.dropout, args.tied).to(device)
 
 criterion = nn.CrossEntropyLoss()
@@ -141,9 +163,13 @@ def evaluate(data_source):
     return total_loss / len(data_source)
 
 
-def train():
+def train(epoch):
     # Turn on training mode which enables dropout.
     model.train()
+
+    total_samples = train_data.size(0)
+    steps_per_epoch = math.ceil(total_samples / args.bptt)
+
     total_loss = 0.
     start_time = time.time()
     ntokens = len(corpus.dictionary)
@@ -174,6 +200,15 @@ def train():
                 elapsed * 1000 / args.log_interval, cur_loss, math.exp(cur_loss)))
             total_loss = 0
             start_time = time.time()
+            stats = ('Peformance/Training/',
+                OrderedDict([
+                    ('Loss', cur_loss),
+                    ('Perplexity', math.exp(cur_loss)),
+                    ('LR', lr),
+                    ('Batch Time', elapsed * 1000)])
+                )
+            steps_completed = batch + 1
+            tflogger.log_training_progress(stats, epoch, steps_completed, total=steps_per_epoch, freq=args.log_interval)
 
 
 def export_onnx(path, batch_size, seq_len):
@@ -189,11 +224,23 @@ def export_onnx(path, batch_size, seq_len):
 lr = args.lr
 best_val_loss = None
 
+msglogger = apputils.config_pylogger('logging.conf', None)
+tflogger = TensorBoardLogger(msglogger.logdir)
+pylogger = PythonLogger(msglogger)
+
+if args.summary:
+    which_summary = args.summary
+    if which_summary == 'png':
+        apputils.draw_lang_model_to_file(model, 'rnn.png', 'wikitext2')
+    else:
+        distiller.model_summary(model, None, which_summary, 'wikitext2')
+    exit(0)
+
 # At any point you can hit Ctrl + C to break out of training early.
 try:
     for epoch in range(1, args.epochs+1):
         epoch_start_time = time.time()
-        train()
+        train(epoch)
         val_loss = evaluate(val_data)
         print('-' * 89)
         print('| end of epoch {:3d} | time: {:5.2f}s | valid loss {:5.2f} | '

@@ -314,7 +314,7 @@ def connectivity_tbl_summary(sgraph, verbose=False):
 
 import pydot
 
-def create_pydot_graph(op_nodes, data_nodes, param_nodes, edges):
+def create_pydot_graph(sgraph, op_nodes, data_nodes, param_nodes, edges):
     pydot_graph = pydot.Dot('Net', graph_type='digraph', rankdir='TB')
 
     node_style = {'shape': 'record',
@@ -324,8 +324,17 @@ def create_pydot_graph(op_nodes, data_nodes, param_nodes, edges):
     for op_node in op_nodes:
         pydot_graph.add_node(pydot.Node(op_node, **node_style))
 
+    param_style = {'shape': 'oval',
+                  'fillcolor': '#008000',
+                  'style': 'rounded, filled'}
     for data_node in data_nodes:
-        pydot_graph.add_node(pydot.Node(data_node))
+        assert sgraph.params is not None
+        if sgraph.params[data_node] is not None:
+            shape = sgraph.param_shape(data_node)
+            label = data_node + '\n' + '('+(', ').join(['%s' % v for v in shape])+')'
+            pydot_graph.add_node(pydot.Node(data_node, **param_style, label=label))
+        else:
+            pydot_graph.add_node(pydot.Node(data_node))
 
     node_style = {'shape': 'oval',
                   'fillcolor': 'gray',
@@ -348,12 +357,39 @@ def draw_model_to_file(sgraph, png_fname):
     with open(png_fname, 'wb') as fid:
         fid.write(png)
 
+def draw_lang_model_to_file(model, png_fname, dataset):
+    try:
+        if dataset == 'wikitext2':
+            batch_size = 20
+            seq_len = 35
+            dummy_input = torch.LongTensor(seq_len * batch_size).zero_().view(-1, batch_size).to('cuda')
+            hidden = model.init_hidden(batch_size)
+            dummy_input = (dummy_input, hidden)
+        else:
+            print("Unsupported dataset (%s) - aborting draw operation" % dataset)
+            return
+        g = SummaryGraph(model, dummy_input)
+        draw_model_to_file(g, png_fname)
+        print("Network PNG image generation completed")
+
+    except FileNotFoundError as e:
+        print("An error has occured while generating the network PNG image.")
+        print("Please check that you have graphviz installed.")
+        print("\t$ sudo apt-get install graphviz")
+        raise e
+
 def draw_img_classifier_to_file(model, png_fname, dataset):
     try:
         if dataset == 'imagenet':
             dummy_input = Variable(torch.randn(1, 3, 224, 224), requires_grad=False)
         elif dataset == 'cifar10':
             dummy_input = Variable(torch.randn(1, 3, 32, 32))
+        elif dataset == 'wikitext2':
+            batch_size = 20
+            seq_len = 35
+            dummy_input = torch.LongTensor(seq_len * batch_size).zero_().view(-1, batch_size).to('cuda')
+            hidden = model.init_hidden(batch_size)
+            dummy_input = (dummy_input, hidden)
         else:
             print("Unsupported dataset (%s) - aborting draw operation" % dataset)
             return
@@ -388,7 +424,7 @@ def create_png(sgraph):
     if False:
         data_nodes = None
 
-    pydot_graph = create_pydot_graph(op_nodes, data_nodes, param_nodes, edges)
+    pydot_graph = create_pydot_graph(sgraph, op_nodes, data_nodes, param_nodes, edges)
     png = pydot_graph.create_png()
     return png
 
