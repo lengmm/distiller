@@ -57,11 +57,13 @@ parser.add_argument('--save', type=str, default='model.pt',
 parser.add_argument('--onnx-export', type=str, default='',
                     help='path to export the final model in onnx format')
 
+# Distiller-related arguments
 SUMMARY_CHOICES = ['sparsity', 'compute', 'optimizer', 'model', 'modules', 'png']
 parser.add_argument('--summary', type=str, choices=SUMMARY_CHOICES,
                     help='print a summary of the model, and exit - options: ' +
                     ' | '.join(SUMMARY_CHOICES))
-
+parser.add_argument('--compress', dest='compress', type=str, nargs='?', action='store',
+                    help='configuration file for pruning the model (default is to use hard-coded schedule)')
 args = parser.parse_args()
 
 # Set the random seed manually for reproducibility.
@@ -92,14 +94,14 @@ print("Done")
 # batch processing.
 
 def batchify(data, bsz):
-    print("batch size %d" % bsz)
+    #print("batch size %d" % bsz)
     # Work out how cleanly we can divide the dataset into bsz parts.
     nbatch = data.size(0) // bsz
     # Trim off any extra elements that wouldn't cleanly fit (remainders).
     data = data.narrow(0, 0, nbatch * bsz)
     # Evenly divide the data across the bsz batches.
     data = data.view(bsz, -1).t().contiguous()
-    print(data.shape)
+    #print(data.shape)
     return data.to(device)
 
 eval_batch_size = 10
@@ -112,8 +114,8 @@ test_data = batchify(corpus.test, eval_batch_size)
 ###############################################################################
 
 ntokens = len(corpus.dictionary)
-print("ntokens = %d" % ntokens)
-print("ninp = %d\nnhid=%d\nnlayers=%d" % (args.emsize, args.nhid, args.nlayers))
+#print("ntokens = %d" % ntokens)
+#print("ninp = %d\nnhid=%d\nnlayers=%d" % (args.emsize, args.nhid, args.nlayers))
 model = model.RNNModel(args.model, ntokens, args.emsize, args.nhid, args.nlayers, args.dropout, args.tied).to(device)
 
 criterion = nn.CrossEntropyLoss()
@@ -163,7 +165,7 @@ def evaluate(data_source):
     return total_loss / len(data_source)
 
 
-def train(epoch):
+def train(epoch, compression_scheduler=None):
     # Turn on training mode which enables dropout.
     model.train()
 
@@ -179,9 +181,20 @@ def train(epoch):
         # Starting each batch, we detach the hidden state from how it was previously produced.
         # If we didn't, the model would try backpropagating all the way to start of the dataset.
         hidden = repackage_hidden(hidden)
-        model.zero_grad()
+
+        if compression_scheduler:
+            compression_scheduler.on_minibatch_begin(epoch, minibatch_id=batch, minibatches_per_epoch=steps_per_epoch)
         output, hidden = model(data, hidden)
         loss = criterion(output.view(-1, ntokens), targets)
+
+        if compression_scheduler:
+            # Before running the backward phase, we add any regularization loss computed by the scheduler
+            regularizer_loss = compression_scheduler.before_backward_pass(epoch, minibatch_id=batch,
+                                                                          minibatches_per_epoch=steps_per_epoch, loss=loss)
+            loss += regularizer_loss
+            #losses['regularizer_loss'].add(regularizer_loss.item())
+
+        model.zero_grad()
         loss.backward()
 
         # `clip_grad_norm` helps prevent the exploding gradient problem in RNNs / LSTMs.
@@ -190,6 +203,9 @@ def train(epoch):
             p.data.add_(-lr, p.grad.data)
 
         total_loss += loss.item()
+
+        if compression_scheduler:
+            compression_scheduler.on_minibatch_end(epoch, minibatch_id=batch, minibatches_per_epoch=steps_per_epoch)
 
         if batch % args.log_interval == 0 and batch > 0:
             cur_loss = total_loss / args.log_interval
@@ -236,11 +252,24 @@ if args.summary:
         distiller.model_summary(model, None, which_summary, 'wikitext2')
     exit(0)
 
+if args.compress:
+    # The main use-case for this sample application is CNN compression.  Compression
+    # requires a compression schedule configuration file in YAML.
+    source = args.compress
+    #msglogger.info("Compression schedule (source=%s)", source)
+    compression_scheduler = distiller.CompressionScheduler(model)
+    distiller.config.fileConfig(model, None, compression_scheduler, args.compress, msglogger)
+
 # At any point you can hit Ctrl + C to break out of training early.
 try:
-    for epoch in range(1, args.epochs+1):
+    for epoch in range(0, args.epochs):
         epoch_start_time = time.time()
-        train(epoch)
+        if compression_scheduler:
+            compression_scheduler.on_epoch_begin(epoch)
+
+        train(epoch, compression_scheduler)
+        distiller.log_weights_sparsity(model, epoch, loggers=[tflogger, pylogger])
+
         val_loss = evaluate(val_data)
         print('-' * 89)
         print('| end of epoch {:3d} | time: {:5.2f}s | valid loss {:5.2f} | '
@@ -255,6 +284,10 @@ try:
         else:
             # Anneal the learning rate if no improvement has been seen in the validation dataset.
             lr /= 4.0
+
+        if compression_scheduler:
+            compression_scheduler.on_epoch_end(epoch)
+
 except KeyboardInterrupt:
     print('-' * 89)
     print('Exiting from training early')
