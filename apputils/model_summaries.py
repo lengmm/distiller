@@ -43,11 +43,7 @@ def onnx_name_2_pytorch_name(name):
     # Next, split by square brackets
     name_parts = re.findall('\[.*?\]', name)
     name_parts = [part[1:-1] for part in name_parts]
-
-    #print(op['name'] , '.'.join(name_parts), op['type'])
     name = '.'.join(name_parts) + instance
-    #if name == '':
-    #    name += 'stam'
     return name
 
 
@@ -113,10 +109,7 @@ class SummaryGraph(object):
                     op['name'] += "." + str(len(same))
 
                 op['name'] = onnx_name_2_pytorch_name(op['name'])
-                #op['name'] = '\n'.join(op['name'], op['type'])
                 op['name'] += ("\n" + op['type'])
-
-                # print(op['name'])
                 self.ops.append(op)
 
                 for input_ in node.inputs():
@@ -163,7 +156,7 @@ class SummaryGraph(object):
             tensor['type'] = s[:s.find('(')]
             s = s[s.find('(')+1: s.find(')')]
             tensor['shape'] = tuple(map(lambda x: int(x), s.split(',')))
-        except:
+        except Exception as e:
             return None
         return tensor
 
@@ -206,7 +199,6 @@ class SummaryGraph(object):
                 if op['type'] == 'Conv' or op['type'] == 'Gemm':
                     conv_w = op['inputs'][1]
                     weights_vol = self.featuremap_volume(conv_w)
-                    #print(ofm_vol , ifm_vol , weights_vol)
                     op['attrs']['footprint'] = ofm_vol + ifm_vol + weights_vol
                     op['attrs']['fm_vol'] = ofm_vol + ifm_vol
                     op['attrs']['weights_vol'] = weights_vol
@@ -325,8 +317,8 @@ def create_pydot_graph(sgraph, op_nodes, data_nodes, featuremap_nodes, edges):
         pydot_graph.add_node(pydot.Node(op_node, **node_style))
 
     featuremap_style = {'shape': 'oval',
-                  'fillcolor': '#008000',
-                  'style': 'rounded, filled'}
+                        'fillcolor': '#008000',
+                        'style': 'rounded, filled'}
     for data_node in data_nodes:
         assert sgraph.featuremaps is not None
         if sgraph.featuremaps[data_node] is not None:
