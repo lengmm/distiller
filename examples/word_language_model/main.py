@@ -252,6 +252,7 @@ if args.summary:
         distiller.model_summary(model, None, which_summary, 'wikitext2')
     exit(0)
 
+compression_scheduler = None
 if args.compress:
     # The main use-case for this sample application is CNN compression.  Compression
     # requires a compression schedule configuration file in YAML.
