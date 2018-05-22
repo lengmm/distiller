@@ -12,6 +12,20 @@ from torch.autograd import Variable
 
 import data
 
+# Set up the paths to import distiller.
+# Distiller is not explicitly used by this script, but because main.py serializes the
+# entire model (look for 'torch.save(model, f)' in main.py), it also creates a
+# dependency on distiller code.
+# It's a bit ironic that PyTorch's docs advise against this kind of serialization,
+# while PyTorch's samples use it: https://pytorch.org/docs/master/notes/serialization.html
+import os
+import sys
+script_dir = os.path.dirname(__file__)
+module_path = os.path.abspath(os.path.join(script_dir, '..', '..'))
+if module_path not in sys.path:
+    sys.path.append(module_path)
+import distiller
+
 parser = argparse.ArgumentParser(description='PyTorch Wikitext-2 Language Model')
 
 # Model parameters.
@@ -34,7 +48,7 @@ parser.add_argument('--log-interval', type=int, default=100,
 args = parser.parse_args()
 
 # Set the random seed manually for reproducibility.
-torch.manual_seed(args.seed)
+#torch.manual_seed(args.seed)
 if torch.cuda.is_available():
     if not args.cuda:
         print("WARNING: You have a CUDA device, so you should probably run with --cuda")
