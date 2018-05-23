@@ -269,7 +269,6 @@ try:
             compression_scheduler.on_epoch_begin(epoch)
 
         train(epoch, compression_scheduler)
-        distiller.log_weights_sparsity(model, epoch, loggers=[tflogger, pylogger])
 
         val_loss = evaluate(val_data)
         print('-' * 89)
@@ -277,6 +276,8 @@ try:
                 'valid ppl {:8.2f}'.format(epoch, (time.time() - epoch_start_time),
                                            val_loss, math.exp(val_loss)))
         print('-' * 89)
+        distiller.log_weights_sparsity(model, epoch, loggers=[tflogger, pylogger])
+
         # Save the model if the validation loss is the best we've seen so far.
         if not best_val_loss or val_loss < best_val_loss:
             with open(args.save, 'wb') as f:
