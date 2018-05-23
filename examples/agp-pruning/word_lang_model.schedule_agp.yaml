@@ -1,20 +1,64 @@
 # Fine grained (element-wise) pruning using Automated Gradual Pruner scheduling for PyTorch's example Word Language model.
 #
-# python3 main.py --cuda --compress=../../examples/agp-pruning/word_lang_model.schedule_agp.yaml
+# The README of PyTorch's promises that this configuration will produce a Test perplexity of 72.30, while I was only able to get 84.23,
+# so I use that as the baseline for comparison.
 #
+# time python3 main.py --cuda --emsize 1500 --nhid 1500 --dropout 0.65 --epochs 40 –tied
+#
+# =========================================================================================
+# | End of training | test loss  4.43 | test ppl    84.23
+# =========================================================================================
+#
+# With the same configuration, and the pruning schedule below, we get comparable perplexity results:
+#
+# python3 main.py --cuda --emsize 1500 --nhid 1500 --dropout 0.65 --epochs 40 --tied --compress=../../examples/agp-pruning/word_lang_model.schedule_agp.yaml
+#
+# Parameters:
+# +----+------------------+---------------+---------------+----------------+------------+------------+----------+----------+----------+------------+---------+----------+------------+
+# |    | Name             | Shape         |   NNZ (dense) |   NNZ (sparse) |   Cols (%) |   Rows (%) |   Ch (%) |   2D (%) |   3D (%) |   Fine (%) |     Std |     Mean |   Abs-Mean |
+# |----+------------------+---------------+---------------+----------------+------------+------------+----------+----------+----------+------------+---------+----------+------------|
+# |  0 | encoder.weight   | (33278, 1500) |      49917000 |       34941900 |    0.00000 |    0.00000 |        0 |  0.00000 |        0 |   30.00000 | 0.11340 |  0.00003 |    0.07420 |
+# |  1 | rnn.weight_ih_l0 | (6000, 1500)  |       9000000 |        3600000 |    0.00000 |    0.00000 |        0 |  0.00000 |        0 |   60.00000 | 0.09887 |  0.00005 |    0.04938 |
+# |  2 | rnn.weight_hh_l0 | (6000, 1500)  |       9000000 |        9000000 |    0.00000 |    0.00000 |        0 |  0.00000 |        0 |    0.00000 | 0.07881 | -0.00013 |    0.05635 |
+# |  3 | rnn.weight_ih_l1 | (6000, 1500)  |       9000000 |        9000000 |    0.00000 |    0.00000 |        0 |  0.00000 |        0 |    0.00000 | 0.12775 | -0.00023 |    0.09670 |
+# |  4 | rnn.weight_hh_l1 | (6000, 1500)  |       9000000 |        9000000 |    0.00000 |    0.00000 |        0 |  0.00000 |        0 |    0.00000 | 0.12058 | -0.00007 |    0.09039 |
+# |  5 | decoder.weight   | (33278, 1500) |      49917000 |       34941900 |    0.00000 |    0.00000 |        0 |  0.00000 |        0 |   30.00000 | 0.11340 |  0.00003 |    0.07420 |
+# |  6 | Total sparsity:  | -             |     135834000 |      100483800 |    0.00000 |    0.00000 |        0 |  0.00000 |        0 |   26.02456 | 0.00000 |  0.00000 |    0.00000 |
+# +----+------------------+---------------+---------------+----------------+------------+------------+----------+----------+----------+------------+---------+----------+------------+
+# Total sparsity: 26.02
+# 
+# =========================================================================================
+# | End of training | test loss  4.43 | test ppl    83.97
+# =========================================================================================
+#
+# real    277m28.635s
+# user    212m43.162s
+# sys     64m42.570s
 
 
 version: 1
 pruners:
-  low_pruner:
+  rnn_pruner:
     class: AutomatedGradualPruner
     initial_sparsity : 0.05
     final_sparsity: 0.60
     weights: [rnn.weight_ih_l0]
 
+  embedding_pruner:
+    class: AutomatedGradualPruner
+    initial_sparsity : 0.05
+    final_sparsity: 0.30
+    weights: [encoder.weight]
+
 policies:
   - pruner:
-      instance_name : low_pruner
+      instance_name : rnn_pruner
     starting_epoch: 0
     ending_epoch: 16
+    frequency: 2
+
+  - pruner:
+      instance_name : embedding_pruner
+    starting_epoch: 1
+    ending_epoch: 17
     frequency: 2
