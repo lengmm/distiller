@@ -54,11 +54,13 @@ parser.add_argument('--log-interval', type=int, default=200, metavar='N',
                     help='report interval')
 parser.add_argument('--save', type=str, default='model.pt',
                     help='path to save the final model')
+parser.add_argument('--resume', default='', type=str, metavar='PATH',
+                    help='path to latest checkpoint (default: none)')
 parser.add_argument('--onnx-export', type=str, default='',
                     help='path to export the final model in onnx format')
 
 # Distiller-related arguments
-SUMMARY_CHOICES = ['sparsity', 'compute', 'optimizer', 'model', 'modules', 'png']
+SUMMARY_CHOICES = ['sparsity', 'compute', 'optimizer', 'model', 'modules', 'png', 'percentile']
 parser.add_argument('--summary', type=str, choices=SUMMARY_CHOICES,
                     help='print a summary of the model, and exit - options: ' +
                     ' | '.join(SUMMARY_CHOICES))
@@ -94,14 +96,12 @@ print("Done")
 # batch processing.
 
 def batchify(data, bsz):
-    #print("batch size %d" % bsz)
     # Work out how cleanly we can divide the dataset into bsz parts.
     nbatch = data.size(0) // bsz
     # Trim off any extra elements that wouldn't cleanly fit (remainders).
     data = data.narrow(0, 0, nbatch * bsz)
     # Evenly divide the data across the bsz batches.
     data = data.view(bsz, -1).t().contiguous()
-    #print(data.shape)
     return data.to(device)
 
 eval_batch_size = 10
@@ -114,9 +114,16 @@ test_data = batchify(corpus.test, eval_batch_size)
 ###############################################################################
 
 ntokens = len(corpus.dictionary)
-#print("ntokens = %d" % ntokens)
-#print("ninp = %d\nnhid=%d\nnlayers=%d" % (args.emsize, args.nhid, args.nlayers))
-model = model.RNNModel(args.model, ntokens, args.emsize, args.nhid, args.nlayers, args.dropout, args.tied).to(device)
+
+if args.resume:
+    with open(args.resume, 'rb') as f:
+        model = torch.load(f)
+        # after load the rnn params are not a continuous chunk of memory
+        # this makes them a continuous chunk, and will speed up forward pass
+        model.rnn.flatten_parameters()
+else:
+    model = model.RNNModel(args.model, ntokens, args.emsize, args.nhid, args.nlayers, args.dropout, args.tied).to(device)
+
 
 criterion = nn.CrossEntropyLoss()
 
@@ -165,7 +172,7 @@ def evaluate(data_source):
     return total_loss / len(data_source)
 
 
-def train(epoch, compression_scheduler=None):
+def train(epoch, optimizer, compression_scheduler=None):
     # Turn on training mode which enables dropout.
     model.train()
 
@@ -195,12 +202,15 @@ def train(epoch, compression_scheduler=None):
             #losses['regularizer_loss'].add(regularizer_loss.item())
 
         model.zero_grad()
+        #optimizer.zero_grad()
         loss.backward()
 
+
         # `clip_grad_norm` helps prevent the exploding gradient problem in RNNs / LSTMs.
-        torch.nn.utils.clip_grad_norm(model.parameters(), args.clip)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip)
         for p in model.parameters():
             p.data.add_(-lr, p.grad.data)
+        #optimizer.step()
 
         total_loss += loss.item()
 
@@ -210,7 +220,7 @@ def train(epoch, compression_scheduler=None):
         if batch % args.log_interval == 0 and batch > 0:
             cur_loss = total_loss / args.log_interval
             elapsed = time.time() - start_time
-            print('| epoch {:3d} | {:5d}/{:5d} batches | lr {:02.2f} | ms/batch {:5.2f} | '
+            print('| epoch {:3d} | {:5d}/{:5d} batches | lr {:02.4f} | ms/batch {:5.2f} | '
                     'loss {:5.2f} | ppl {:8.2f}'.format(
                 epoch, batch, len(train_data) // args.bptt, lr,
                 elapsed * 1000 / args.log_interval, cur_loss, math.exp(cur_loss)))
@@ -248,18 +258,29 @@ if args.summary:
     which_summary = args.summary
     if which_summary == 'png':
         apputils.draw_lang_model_to_file(model, 'rnn.png', 'wikitext2')
+    elif which_summary == 'percentile':
+        percentile = 0.9
+        for name, param in model.state_dict().items():
+            bottomk, _ = torch.topk(param.abs().view(-1), int(percentile * param.numel()), largest=False, sorted=True)
+            threshold = bottomk.data[-1]
+            print("parameter %s: q = %.2f" %(name, threshold))
     else:
         distiller.model_summary(model, None, which_summary, 'wikitext2')
+
     exit(0)
 
 compression_scheduler = None
+
 if args.compress:
     # The main use-case for this sample application is CNN compression.  Compression
     # requires a compression schedule configuration file in YAML.
     source = args.compress
-    #msglogger.info("Compression schedule (source=%s)", source)
     compression_scheduler = distiller.CompressionScheduler(model)
     distiller.config.fileConfig(model, None, compression_scheduler, args.compress, msglogger)
+
+optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, eps=1e-9, betas=[0.9, 0.98])
+#optimizer = optim.SparseAdam(model.parameters(), lr=args.lr, eps=1e-9, betas=[0.9, 0.98])
+
 
 # At any point you can hit Ctrl + C to break out of training early.
 try:
@@ -268,7 +289,7 @@ try:
         if compression_scheduler:
             compression_scheduler.on_epoch_begin(epoch)
 
-        train(epoch, compression_scheduler)
+        train(epoch, optimizer, compression_scheduler)
 
         val_loss = evaluate(val_data)
         print('-' * 89)
@@ -278,6 +299,12 @@ try:
         print('-' * 89)
         distiller.log_weights_sparsity(model, epoch, loggers=[tflogger, pylogger])
 
+        stats = ('Peformance/Validation/',
+            OrderedDict([
+                ('Loss', val_loss),
+                ('Perplexity', math.exp(val_loss))]))
+        tflogger.log_training_progress(stats, epoch, 0, total=1, freq=1)
+
         # Save the model if the validation loss is the best we've seen so far.
         if not best_val_loss or val_loss < best_val_loss:
             with open(args.save, 'wb') as f:
@@ -285,7 +312,7 @@ try:
             best_val_loss = val_loss
         else:
             # Anneal the learning rate if no improvement has been seen in the validation dataset.
-            lr /= 4.0
+            lr /= 2 #1.2
 
         if compression_scheduler:
             compression_scheduler.on_epoch_end(epoch)

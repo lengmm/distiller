@@ -3,11 +3,14 @@
 # The README of PyTorch's promises that this configuration will produce a Test perplexity of 72.30, while I was only able to get 84.23,
 # so I use that as the baseline for comparison.
 #
-# time python3 main.py --cuda --emsize 1500 --nhid 1500 --dropout 0.65 --epochs 40 –tied
+# time python3 main.py --cuda --emsize 1500 --nhid 1500 --dropout 0.65 --epochs 40 --tied
 #
 # =========================================================================================
 # | End of training | test loss  4.43 | test ppl    84.23
 # =========================================================================================
+#
+# To save you time, you can download a pretrained model from here:
+# https://s3-us-west-1.amazonaws.com/nndistiller/agp-pruning/word_language_model/model.emsize1500.nhid1500.dropout065.tied.pt
 #
 # With the same configuration, and the pruning schedule below, we get comparable perplexity results:
 #
@@ -26,7 +29,7 @@
 # |  6 | Total sparsity:  | -             |     135834000 |      100483800 |    0.00000 |    0.00000 |        0 |  0.00000 |        0 |   26.02456 | 0.00000 |  0.00000 |    0.00000 |
 # +----+------------------+---------------+---------------+----------------+------------+------------+----------+----------+----------+------------+---------+----------+------------+
 # Total sparsity: 26.02
-# 
+#
 # =========================================================================================
 # | End of training | test loss  4.43 | test ppl    83.97
 # =========================================================================================
@@ -38,27 +41,39 @@
 
 version: 1
 pruners:
-  rnn_pruner:
+  l0_rnn_pruner:
     class: AutomatedGradualPruner
     initial_sparsity : 0.05
     final_sparsity: 0.60
-    weights: [rnn.weight_ih_l0]
+    weights: [rnn.weight_ih_l0, rnn.weight_hh_l0]
+
+  l1_rnn_pruner:
+    class: AutomatedGradualPruner
+    initial_sparsity : 0.05
+    final_sparsity: 0.85
+    weights: [rnn.weight_ih_l1, rnn.weight_hh_l1]
 
   embedding_pruner:
     class: AutomatedGradualPruner
     initial_sparsity : 0.05
-    final_sparsity: 0.30
+    final_sparsity: 0.90
     weights: [encoder.weight]
 
 policies:
   - pruner:
-      instance_name : rnn_pruner
+      instance_name : l0_rnn_pruner
     starting_epoch: 0
-    ending_epoch: 16
+    ending_epoch: 14  #14
+    frequency: 2
+
+  - pruner:
+      instance_name : l1_rnn_pruner
+    starting_epoch: 0
+    ending_epoch: 14 #14
     frequency: 2
 
   - pruner:
       instance_name : embedding_pruner
     starting_epoch: 1
-    ending_epoch: 17
+    ending_epoch: 17 #17
     frequency: 2
